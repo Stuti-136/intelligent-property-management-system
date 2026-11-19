@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "sync-graph": "node --env-file=.env.local scripts/sync-graph.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

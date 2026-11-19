@@ -1,14 +1,17 @@
+import "./globals.css";
+
 export const metadata = {
-  title: "Intelligent Property Management System",
-  description: "Hybrid PostgreSQL + Neo4j property management platform",
+  title: {
+    default: "Property Management",
+    template: "%s | Property Management",
+  },
+  description: "Properties, tenants, rent and repairs in one place.",
 };
 
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body style={{ fontFamily: "system-ui, sans-serif", margin: 0, padding: 24 }}>
-        {children}
-      </body>
+      <body>{children}</body>
     </html>
   );
 }

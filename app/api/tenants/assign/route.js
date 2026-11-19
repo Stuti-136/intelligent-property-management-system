@@ -3,30 +3,67 @@ import { withTransaction } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 import { HttpError, handleError, parseDate, parseId, readJson } from "@/lib/http";
 import { safely, syncTenancy } from "@/lib/graph";
+import { MAX_PDF_BYTES, isPdfBuffer, removeLeasePdf, saveLeasePdf } from "@/lib/storage";
 
 // POST /api/tenants/assign   (Landlord only)
-// body: { user_id, property_id, lease_start_date, lease_end_date?, file_name?, file_path? }
+//
+// Accepts either
+//   multipart/form-data: user_id, property_id, lease_start_date, lease_end_date, lease_pdf (file, optional)
+//   application/json:    user_id, property_id, lease_start_date, lease_end_date?, file_name?, file_path?
 //
 // ONE TRANSACTION, three steps (all succeed or none do):
 //   1. insert the tenant row
 //   2. mark the property 'Occupied'
-//   3. insert the lease document metadata (if provided)
+//   3. insert the lease document metadata (if a lease was provided)
+// If the transaction fails, an uploaded PDF is deleted again so no orphan files remain.
+
+async function readInput(request) {
+  const type = request.headers.get("content-type") || "";
+  if (type.includes("multipart/form-data")) {
+    let form;
+    try {
+      form = await request.formData();
+    } catch {
+      throw new HttpError(400, "Invalid form data");
+    }
+    const fields = {};
+    for (const [key, value] of form.entries()) {
+      if (typeof value === "string") fields[key] = value;
+    }
+    const file = form.get("lease_pdf");
+    const hasFile = file && typeof file === "object" && file.size > 0;
+    return { fields, file: hasFile ? file : null };
+  }
+  return { fields: await readJson(request), file: null };
+}
+
 export async function POST(request) {
   const { session, error } = await requireAuth(["Landlord"]);
   if (error) return error;
 
+  let storedPath = null;
   try {
-    const body = await readJson(request);
-    const userId = parseId(body.user_id, "user_id");
-    const propertyId = parseId(body.property_id, "property_id");
-    const start = parseDate(body.lease_start_date, "lease_start_date");
-    const end = body.lease_end_date ? parseDate(body.lease_end_date, "lease_end_date") : null;
+    const { fields, file } = await readInput(request);
+
+    const userId = parseId(fields.user_id, "user_id");
+    const propertyId = parseId(fields.property_id, "property_id");
+    const start = parseDate(fields.lease_start_date, "lease_start_date");
+    const end = fields.lease_end_date ? parseDate(fields.lease_end_date, "lease_end_date") : null;
     if (end && end < start) throw new HttpError(400, "lease_end_date cannot be before lease_start_date");
 
-    const fileName = body.file_name ? String(body.file_name).trim() : null;
-    const filePath = body.file_path ? String(body.file_path).trim() : null;
+    let fileName = fields.file_name ? String(fields.file_name).trim() : null;
+    let filePath = fields.file_path ? String(fields.file_path).trim() : null;
     if (fileName && !filePath) throw new HttpError(400, "file_path is required when file_name is given");
     if (filePath && !fileName) throw new HttpError(400, "file_name is required when file_path is given");
+
+    if (file) {
+      if (file.size > MAX_PDF_BYTES) throw new HttpError(413, "The lease PDF must be 5 MB or smaller");
+      const buffer = Buffer.from(await file.arrayBuffer());
+      if (!isPdfBuffer(buffer)) throw new HttpError(400, "The lease document must be a PDF file");
+      storedPath = await saveLeasePdf(buffer);
+      fileName = String(file.name || "lease.pdf").replace(/[\\/]/g, "_").slice(0, 255);
+      filePath = storedPath;
+    }
 
     const result = await withTransaction(async (client) => {
       // Lock the property row so two requests can't assign it at the same time.
@@ -85,6 +122,7 @@ export async function POST(request) {
       { status: 201 }
     );
   } catch (err) {
+    if (storedPath) await removeLeasePdf(storedPath);
     return handleError(err);
   }
 }
